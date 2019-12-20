@@ -92,6 +92,64 @@ O fluxo proposto foi executado contra uma base de dados formada por 17 arquivos 
 
 nenhuma modificação do fluxo seria necessária para processar volumes maiores, muito embora ajustes no tamanho e número de partições do RDD de entrada poderia tornar o processo mais eficiente.
 
+Apesar de existirem bibliotecas de bioinformática que utilizam Spark como engine de processamento, como a [Adam](https://github.com/bigdatagenomics/adam), o fluxo proposto foi implementand usando apenas as biblioteca cliente do Spark para Python mantidas pela comunidade. O parse de arquivos de entrada FASTA e FASTAQ foi feito utilizando fluxos de transformações de Dataframes. Essa etapa do fluxo exigiu o processamento de linhas levando em consideração a ordem em que aparecem nos arquivos de entrada. O código de parse desses arquivos está descrito pelas funções:
+
+```python
+# pase das linhas Header
+fasta_null_ids_df = fasta_plain_df.withColumn("seqID_wNull", seq2kmer_udf("row"))
+
+# preenchimento dos valores nulos pelo último valor não nulo na coluna de ID
+fasta_n_filter_df = fasta_null_ids_df.withColumn(
+    "seqID", F.last('seqID_wNull', ignorenulls=True)\
+    .over(Window\
+    .orderBy('idx')\
+    .rowsBetween(Window.unboundedPreceding, Window.currentRow)))
+
+# removendo as linhas Header
+fasta_df = fasta_n_filter_df\
+                .where(F.col("seqID_wNull").isNull())\
+                .select("seqID","row")\
+                .toDF("seqID","seq")
+
+# redução por chave para concatenar sequência
+fasta_per_seq_df = fasta_df.rdd\
+            .map(lambda r: (r.seqID, r.seq[0]))\
+            .reduceByKey(lambda x,y:x+y)\
+            .map(lambda x: Row(seqID=x[1],seq=x[0]))\
+            .toDF(["seqID", "seq"])
+```
+
+Conceitualmente, arquivos FASTA são compostos de pares chave-valor em que as chaves são os identificadores das sequẽncias e o valor a sequência de aminoácidos em si. Não obstante, o último bloco de transofornações executa uma concatenação de partes de sequẽncias (que estavam em linhas distintas no arquivo original).
+
+A função de *parse* das linhas header utiliza o primeiro caracter não " " como separador do ID, primeira parte da linha, dos comentários que compõem a segunda parte. Essas linhas se diferenciam das que contém as partes das sequências pois começam com o caracter ">". 
+
+```python
+def parse_fasta_id_line(l):
+    """
+    Desejamos extrair os IDs das sequências da linhas que começarem pelo caracter ''>'. Pelo padrão
+    FASTA, o ID é a primeira palavra e é um campo composto por ID.CONTIG
+    
+    Input>
+        l: Uma linha de um arquivo FASTA
+    Return:
+        ID: da sequência ignorando o número de contigs, ou None caso não seja uma linha de ID
+    """
+    if l[0][0] == ">":
+        heaer_splits = l[0][1:].split(" ")[0]
+        seq_id_split = heaer_splits.split(".")
+        return seq_id_split[0]
+    else:
+        return None
+
+seq2kmer_udf = udf(parse_fasta_id_line, T.StringType())
+```
+
+Um detalhe de implementação é a utilização da função *udf* importada do pacote *pyspark.sql.functions* como wrapper da função em si para que possa ser utilizada na geração de uma coluna através da função *withColumn*. O programador é obrigado a declarar o tipo de retorno utilizando os tipos disponíveis no pacote *pyspark.sql.types* para que o *pyspark* seja capaz de converteros tipos *Scala* em tipos *Python*.
+
+O processo para os arquivos do tipo FASTAQ guarda semelhanças, mas esses arquivos são compostos por conjuntos de: identificador, sequência, linha de comentário e linha de qualidade de leitura e portanto o conjunto de transoformações utilizadas é ligeiramente diferente.
+
+Nos experimentos executados, resolveu-se utilizar apenas arquivos FASTA que são mais comuns
+
 ### Trabalhos futuros
 
 Trabalhos futuros podem explorar a qualidade do fluxo proposto do ponto de vista biológico ao compará-lo com outros existentes que executem a mesma tarefa. Variantes do fluxo podem ser testadas pela modificação do algoritmo de clusterização, métrica de avaliação de distância e variação do tamanho dos k-mers. O teste da performance do fluxo exige o aumento da base de entrada e o ajuste da infraestrutura adequada.
